@@ -26,6 +26,7 @@ benchmark = [
     "pyarrow>=14.0",
     "tifffile>=2025.5.10",
 ]
+accel = ["numba>=0.59"]
 
 [project.urls]
 Homepage = "https://github.com/afermg/cp_measure"

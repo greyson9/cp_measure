@@ -1,3 +1,19 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Numba cache
+*.nbi
+*.nbc
+
+# Distribution / packaging
+dist/
+*.egg-info/
+
+# Dev environment
 /.agent-shell/
 .pre-commit-config.yaml
+
+# OS
+.DS_Store
