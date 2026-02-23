@@ -54,8 +54,16 @@ References
 import numpy
 import scipy.ndimage
 import skimage.morphology
-from cp_measure.utils import _ensure_np_array as fix
 from numpy.typing import NDArray
+
+# NOTE: get_granularity below is a hand-resolved merge of:
+#   - afermg/cp_measure:main (HEAD) — full-resolution labels for per-object stats,
+#     per-iteration current_mean update for correct per-scale granularity increments
+#   - timtreis/perf/speedup-get-granularity (4ffbc54) — bincount aggregation,
+#     skip identity map_coordinates, drop unnecessary .copy() before erosion
+# The combination preserves HEAD's feature semantics (full-resolution masks for
+# accurate per-object boundaries; per-scale increments) while gaining D's
+# bincount speedup. See feature-equivalence test in test/.
 
 
 def get_granularity(
@@ -248,38 +256,71 @@ def get_granularity(
     # CellProfiler's ObjectRecord initialisation which also uses im_pixel_data directly.
     unique_labels = numpy.unique(orig_mask)
     unique_labels = unique_labels[unique_labels > 0]
-    range_ = numpy.arange(1, numpy.max(orig_mask) + 1)
+    max_label = int(numpy.max(orig_mask))
+    range_ = numpy.arange(1, max_label + 1)
 
-    current_mean = fix(scipy.ndimage.mean(orig_pixels, orig_mask, range_))
+    # Use bincount for per-label aggregation rather than scipy.ndimage.mean —
+    # ~2-5x faster on dense Cell Painting masks. Semantics are equivalent: both
+    # compute sum-of-weights / count-per-label. We operate on the
+    # full-resolution orig_mask so per-object boundaries remain accurate.
+    # The counts_safe NaN trick gives NaN for missing labels, matching
+    # scipy.ndimage.mean's behavior.
+    flat_orig_labels = orig_mask.ravel().astype(numpy.intp)
+    counts = numpy.bincount(flat_orig_labels, minlength=max_label + 1)[1:]
+    counts_safe = counts.astype(float)
+    counts_safe[counts_safe == 0] = numpy.nan
+
+    current_mean = (
+        numpy.bincount(
+            flat_orig_labels,
+            weights=orig_pixels.ravel(),
+            minlength=max_label + 1,
+        )[1:]
+        / counts_safe
+    )
     start_mean = numpy.maximum(current_mean, numpy.finfo(float).eps)
+
+    # Skip the per-iteration map_coordinates upsample if subsampling wasn't
+    # applied (i.e., subsample_size >= 1.0 made new_shape == orig_shape).
+    need_remap = not numpy.array_equal(new_shape, orig_shape)
 
     results: dict[str, NDArray[numpy.floating]] = {}
     for granularity_id in range(1, ng + 1):
-        ero_mask = ero.copy()
-        # Shrink bright regions
-        ero = skimage.morphology.erosion(ero_mask, footprint=footprint)
+        # Shrink bright regions (erosion returns a new array, no .copy needed)
+        ero = skimage.morphology.erosion(ero, footprint=footprint)
         # Reconstruct: undo erosion for pixels that were already small
         rec = skimage.morphology.reconstruction(ero, pixels, footprint=footprint)
 
-        # Restore reconstructed image to original scale to match object labels
-        if pixels.ndim == 2:
-            i, j = numpy.mgrid[0 : orig_shape[0], 0 : orig_shape[1]].astype(float)
-            i *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
-            j *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
-            rec_orig = scipy.ndimage.map_coordinates(rec, (i, j), order=1)
+        # Restore reconstructed image to original scale to match object labels.
+        # Skip when shapes already match (subsample_size >= 1.0).
+        if need_remap:
+            if pixels.ndim == 2:
+                i, j = numpy.mgrid[0 : orig_shape[0], 0 : orig_shape[1]].astype(float)
+                i *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
+                j *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
+                rec_orig = scipy.ndimage.map_coordinates(rec, (i, j), order=1)
+            else:
+                k, i, j = numpy.mgrid[
+                    0 : orig_shape[0], 0 : orig_shape[1], 0 : orig_shape[2]
+                ].astype(float)
+                k *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
+                i *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
+                j *= float(new_shape[2] - 1) / float(orig_shape[2] - 1)
+                rec_orig = scipy.ndimage.map_coordinates(rec, (k, i, j), order=1)
         else:
-            k, i, j = numpy.mgrid[
-                0 : orig_shape[0], 0 : orig_shape[1], 0 : orig_shape[2]
-            ].astype(float)
-            k *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
-            i *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
-            j *= float(new_shape[2] - 1) / float(orig_shape[2] - 1)
-            rec_orig = scipy.ndimage.map_coordinates(rec, (k, i, j), order=1)
+            rec_orig = rec
 
         # Calculate the means for the objects
         gss = numpy.zeros((0,))
         if unique_labels.any():
-            new_mean = fix(scipy.ndimage.mean(rec_orig, orig_mask, range_))
+            new_mean = (
+                numpy.bincount(
+                    flat_orig_labels,
+                    weights=rec_orig.ravel(),
+                    minlength=max_label + 1,
+                )[1:]
+                / counts_safe
+            )
             gss = (current_mean - new_mean) * 100 / start_mean
             current_mean = new_mean  # update running mean for next iteration
 
