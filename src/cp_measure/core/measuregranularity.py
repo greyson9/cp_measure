@@ -58,6 +58,79 @@ from cp_measure.utils import _ensure_np_array as fix
 from numpy.typing import NDArray
 
 
+def _make_object_mean_fn(ndim, orig_mask, orig_shape, new_shape, range_):
+    """Build ``rec -> per-label mean of rec upsampled to original scale``.
+
+    The granular-spectrum loop needs, each iteration, the mean over every
+    original-scale object of the reconstructed (subsampled) image upsampled
+    back to original resolution. The bilinear upsample uses fixed coordinates
+    and the per-label mean is linear, so for 2D we precompute the gather
+    (4 neighbour indices + weights) for the labelled pixels once and evaluate
+    the means straight from the small subsampled image (gather + bincount).
+    This is numerically equivalent to ``map_coordinates(order=1)`` followed by
+    ``scipy.ndimage.mean`` (differing only in float summation order). The 3D
+    path keeps the original map_coordinates upsample unchanged.
+    """
+    nlabels = len(range_)
+
+    if ndim != 2 or nlabels == 0:
+
+        def object_means(rec):
+            if ndim == 2:
+                i, j = numpy.mgrid[0 : orig_shape[0], 0 : orig_shape[1]].astype(float)
+                i *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
+                j *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
+                rec_orig = scipy.ndimage.map_coordinates(rec, (i, j), order=1)
+            else:
+                k, i, j = numpy.mgrid[
+                    0 : orig_shape[0], 0 : orig_shape[1], 0 : orig_shape[2]
+                ].astype(float)
+                k *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
+                i *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
+                j *= float(new_shape[2] - 1) / float(orig_shape[2] - 1)
+                rec_orig = scipy.ndimage.map_coordinates(rec, (k, i, j), order=1)
+            return fix(scipy.ndimage.mean(rec_orig, orig_mask, range_))
+
+        return object_means
+
+    # 2D fast path: precompute the bilinear gather for labelled pixels.
+    sel = orig_mask > 0
+    lab = orig_mask[sel].astype(numpy.intp) - 1  # 0-based label per labelled pixel
+    rows, cols = numpy.nonzero(sel)
+    ci = rows * (float(new_shape[0] - 1) / float(orig_shape[0] - 1))
+    cj = cols * (float(new_shape[1] - 1) / float(orig_shape[1] - 1))
+    i0 = numpy.floor(ci).astype(numpy.intp)
+    j0 = numpy.floor(cj).astype(numpy.intp)
+    wi = ci - i0
+    wj = cj - j0
+    i1 = numpy.minimum(i0 + 1, new_shape[0] - 1)
+    j1 = numpy.minimum(j0 + 1, new_shape[1] - 1)
+    stride = int(new_shape[1])
+    idx00 = i0 * stride + j0
+    idx01 = i0 * stride + j1
+    idx10 = i1 * stride + j0
+    idx11 = i1 * stride + j1
+    w00 = (1.0 - wi) * (1.0 - wj)
+    w01 = (1.0 - wi) * wj
+    w10 = wi * (1.0 - wj)
+    w11 = wi * wj
+    counts = numpy.bincount(lab, minlength=nlabels).astype(float)
+
+    def object_means(rec):
+        flat = numpy.asarray(rec).reshape(-1)
+        vals = (
+            w00 * flat[idx00]
+            + w01 * flat[idx01]
+            + w10 * flat[idx10]
+            + w11 * flat[idx11]
+        )
+        sums = numpy.bincount(lab, weights=vals, minlength=nlabels)
+        with numpy.errstate(invalid="ignore", divide="ignore"):
+            return sums / counts  # NaN where a label is absent (count == 0)
+
+    return object_means
+
+
 def get_granularity(
     mask: NDArray[numpy.integer],
     pixels: NDArray[numpy.floating],
@@ -253,6 +326,13 @@ def get_granularity(
     current_mean = fix(scipy.ndimage.mean(orig_pixels, orig_mask, range_))
     start_mean = numpy.maximum(current_mean, numpy.finfo(float).eps)
 
+    # Precompute the (subsampled rec -> per-object mean at original scale)
+    # operator once; see _make_object_mean_fn. Replaces a full-resolution
+    # map_coordinates upsample + scipy.ndimage.mean on every iteration.
+    object_means = _make_object_mean_fn(
+        pixels.ndim, orig_mask, orig_shape, new_shape, range_
+    )
+
     results: dict[str, NDArray[numpy.floating]] = {}
     for granularity_id in range(1, ng + 1):
         ero_mask = ero.copy()
@@ -261,25 +341,10 @@ def get_granularity(
         # Reconstruct: undo erosion for pixels that were already small
         rec = skimage.morphology.reconstruction(ero, pixels, footprint=footprint)
 
-        # Restore reconstructed image to original scale to match object labels
-        if pixels.ndim == 2:
-            i, j = numpy.mgrid[0 : orig_shape[0], 0 : orig_shape[1]].astype(float)
-            i *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
-            j *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
-            rec_orig = scipy.ndimage.map_coordinates(rec, (i, j), order=1)
-        else:
-            k, i, j = numpy.mgrid[
-                0 : orig_shape[0], 0 : orig_shape[1], 0 : orig_shape[2]
-            ].astype(float)
-            k *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
-            i *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
-            j *= float(new_shape[2] - 1) / float(orig_shape[2] - 1)
-            rec_orig = scipy.ndimage.map_coordinates(rec, (k, i, j), order=1)
-
-        # Calculate the means for the objects
+        # Calculate the means for the objects (at original label scale)
         gss = numpy.zeros((0,))
         if unique_labels.any():
-            new_mean = fix(scipy.ndimage.mean(rec_orig, orig_mask, range_))
+            new_mean = object_means(rec)
             gss = (current_mean - new_mean) * 100 / start_mean
             current_mean = new_mean  # update running mean for next iteration
 

@@ -207,3 +207,35 @@ def test_texture_n_jobs_matches_serial():
             serial[key], parallel[key], equal_nan=True,
             err_msg=f"n_jobs changed output for {key}",
         )
+
+
+def test_granularity_object_mean_fn_matches_map_coordinates():
+    """The 2D granularity fast path must equal the map_coordinates upsample +
+    per-label mean it replaces.
+
+    get_granularity precomputes a bilinear gather to take per-object means of
+    the upsampled reconstruction without building a full-resolution image. This
+    pins that operator against the original reference computation.
+    """
+    import scipy.ndimage
+
+    from cp_measure.core.measuregranularity import _make_object_mean_fn
+
+    rng = numpy.random.default_rng(5)
+    orig_shape = numpy.array([80, 80])
+    new_shape = numpy.array([20, 20])
+    mask = numpy.zeros((80, 80), dtype=numpy.int32)
+    mask[10:40, 10:40] = 1
+    mask[50:70, 50:70] = 2
+    range_ = numpy.arange(1, mask.max() + 1)
+    rec = rng.random((20, 20))
+
+    fast = _make_object_mean_fn(2, mask, orig_shape, new_shape, range_)(rec)
+
+    i, j = numpy.mgrid[0:80, 0:80].astype(float)
+    i *= float(new_shape[0] - 1) / float(orig_shape[0] - 1)
+    j *= float(new_shape[1] - 1) / float(orig_shape[1] - 1)
+    rec_orig = scipy.ndimage.map_coordinates(rec, (i, j), order=1)
+    reference = scipy.ndimage.mean(rec_orig, mask, range_)
+
+    numpy.testing.assert_allclose(fast, reference, rtol=1e-9, atol=1e-12)
