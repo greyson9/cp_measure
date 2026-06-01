@@ -138,7 +138,7 @@ def get_radial_distribution(
         return {}
 
     if labels.dtype == bool:
-        labels = labels.astype(numpy.integer)
+        labels = labels.astype(numpy.int32)
 
     unique_labels = numpy.unique(labels)
     unique_labels = unique_labels[unique_labels > 0]

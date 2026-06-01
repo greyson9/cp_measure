@@ -139,6 +139,16 @@ def get_intensity(
     # MODIFIED: Extract the number of objects by explicitly removing 0s
     nobjects = (unique_vals > 0).sum()
 
+    # Outputs are written at index (label - 1), which assumes labels are the
+    # contiguous sequence 1..nobjects. Fail loudly rather than with an opaque
+    # IndexError when that contract is violated (see README "Contiguous labels").
+    if nobjects and unique_vals.max() != nobjects:
+        raise ValueError(
+            f"get_intensity requires contiguous object labels 1..N (got "
+            f"{int(nobjects)} objects but maximum label {int(unique_vals.max())}); "
+            "relabel with skimage.segmentation.relabel_sequential first."
+        )
+
     integrated_intensity = numpy.zeros((nobjects,))
     mean_intensity = numpy.zeros((nobjects,))
     std_intensity = numpy.zeros((nobjects,))
@@ -294,7 +304,9 @@ def get_intensity(
             #
             madimg = numpy.abs(limg - median_intensity[llabels - 1])
             order = numpy.lexsort((madimg, llabels))
-            qindex = indices.astype(float) + areas / pixels.ndim
+            # MAD uses the median rank (areas / 2); the previous areas / pixels.ndim
+            # was correct only in 2D (ndim == 2) and produced wrong values in 3D.
+            qindex = indices.astype(float) + areas / 2.0
             qfraction = qindex - numpy.floor(qindex)
             qindex = qindex.astype(int)
             qmask = qindex < indices + areas - 1

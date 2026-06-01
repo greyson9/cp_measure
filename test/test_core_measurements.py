@@ -126,3 +126,56 @@ def test_get_intensity_edge_measurements_flag():
     assert "Intensity_IntegratedIntensity" in result_without_edge
     assert "Intensity_MeanIntensity" in result_without_edge
     assert all(len(v) == n_objects for v in result_without_edge.values())
+
+
+def test_intensity_mad_is_dimension_invariant():
+    """MADIntensity depends only on the intensity multiset, not on whether the
+    object is 2D or 3D.
+
+    Guards a real 3D bug: the MAD quantile rank used ``areas / pixels.ndim``,
+    which equals the correct ``areas / 2`` only in 2D and computed a wrong
+    (1/3) rank in 3D. Feeding the same 400 values arranged as a 2D vs a 3D
+    object must yield the same MAD; pre-fix they differed.
+    """
+    rng = numpy.random.default_rng(7)
+    vals = rng.random(400)
+
+    img2d = vals.reshape(20, 20)
+    mask2d = numpy.ones((20, 20), dtype=numpy.int32)
+    mad2d = get_intensity(mask2d, img2d)["Intensity_MADIntensity"][0]
+
+    img3d = vals.reshape(4, 10, 10)
+    mask3d = numpy.ones((4, 10, 10), dtype=numpy.int32)
+    mad3d = get_intensity(mask3d, img3d)["Intensity_MADIntensity"][0]
+
+    assert numpy.isclose(mad2d, mad3d), (
+        f"MAD must be dimension-invariant, got 2D={mad2d} vs 3D={mad3d}"
+    )
+
+
+def test_intensity_noncontiguous_labels_raises():
+    """Outputs are written at index (label - 1), so non-contiguous labels must
+    fail with a clear error rather than an opaque IndexError (README contract)."""
+    mask = numpy.zeros((40, 40), dtype=numpy.int32)
+    mask[5:15, 5:15] = 1
+    mask[20:30, 20:30] = 3  # gap: no label 2
+    pixels = get_pixels(size=40)
+    with pytest.raises(ValueError, match="contiguous"):
+        get_intensity(mask, pixels)
+
+
+def test_radial_distribution_accepts_bool_mask():
+    """A boolean mask is a valid single-object labeling and must be accepted.
+
+    Previously crashed in ``labels.astype(numpy.integer)`` (an abstract type,
+    rejected by numpy 2.x)."""
+    from cp_measure.core.measureobjectintensitydistribution import (
+        get_radial_distribution,
+    )
+
+    mask = numpy.zeros((60, 60), dtype=bool)
+    mask[10:50, 10:50] = True
+    pixels = get_pixels(size=60).astype(float)
+    result = get_radial_distribution(mask, pixels)
+    assert len(result) > 0
+    assert all(len(v) == 1 for v in result.values())
