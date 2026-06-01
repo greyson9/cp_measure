@@ -166,13 +166,6 @@ def get_intensity(
     max_y = numpy.zeros((nobjects,))
     max_z = numpy.zeros((nobjects,))
 
-    label_matrices = numpy.zeros((nobjects, *masks.shape), dtype=int)  # N,Y,X
-    unique_labels = unique_vals[unique_vals > 0]
-    for i, label in enumerate(
-        unique_labels
-    ):  # Assumes all labels from 1 to nobjects are present
-        label_matrices[i][masks == label] = label
-
     if edge_measurements:
         integrated_intensity_edge = numpy.zeros((nobjects,))
         mean_intensity_edge = numpy.zeros((nobjects,))
@@ -181,13 +174,12 @@ def get_intensity(
         max_intensity_edge = numpy.zeros((nobjects,))
 
     result = {}
-    # for labels, lindexes in ((mask, numpy.array([1])),):
-    for labels, lindexes in zip(label_matrices, unique_labels):
-        lindexes = lindexes[lindexes != 0]
-
-        if pixels.ndim == 2:
-            labels = labels.reshape(1, *labels.shape)
-
+    # Single pass over ALL labels at once. The scipy.ndimage reductions below
+    # are per-label, so the old per-object loop — which also allocated an
+    # (N_objects, *image) array and rebuilt mgrid every iteration — was pure
+    # overhead. The one-iteration loop keeps the body below byte-for-byte.
+    full_labels = masks.reshape(1, *masks.shape) if pixels.ndim == 2 else masks
+    for labels, lindexes in ((full_labels, numpy.arange(1, nobjects + 1)),):
         masked_labels = labels
 
         lmask = (masked_labels > 0) & numpy.isfinite(masked_image)  # Ignore NaNs, Infs
@@ -346,6 +338,7 @@ def get_intensity(
                         scipy.ndimage.mean(
                             (eimg - mean_intensity_edge[elabels - 1]) ** 2,
                             elabels,
+                            lindexes,
                         )
                     )
                 )
