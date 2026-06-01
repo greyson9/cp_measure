@@ -157,11 +157,27 @@ InverseDifferenceMoment SumAverage SumVariance SumEntropy Entropy
 DifferenceVariance DifferenceEntropy InfoMeas1 InfoMeas2""".split()
 
 
+# Threads beyond ~8 gave no benefit in testing (oversubscription), so the
+# default parallelism is capped here even on many-core machines.
+_DEFAULT_MAX_WORKERS = 8
+
+
 def _resolve_workers(n_jobs: int | None, n_items: int) -> int:
-    """Map an sklearn-style ``n_jobs`` to a concrete, bounded worker count."""
-    if n_jobs is None or n_jobs == 1:
+    """Map an sklearn-style ``n_jobs`` to a concrete, bounded worker count.
+
+    ``None`` (the default) parallelises with a capped worker count; ``1``
+    forces serial; ``-1`` uses all CPUs; ``N`` uses N threads. Never exceeds
+    the number of objects.
+    """
+    if n_jobs == 1:
         return 1
-    workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    cpu = os.cpu_count() or 1
+    if n_jobs is None:
+        workers = min(cpu, _DEFAULT_MAX_WORKERS)
+    elif n_jobs == -1:
+        workers = cpu
+    else:
+        workers = n_jobs
     return max(1, min(workers, n_items or 1))
 
 
@@ -200,10 +216,12 @@ def get_texture(
         than the scale of texture you are measuring), the texture cannot be
         measured and will result in a undefined value in the output file.
     n_jobs : int, optional (default is None)
-        Number of threads for the per-object Haralick computation. ``None`` or
-        ``1`` runs serially; ``-1`` uses all CPUs. The per-object calls release
-        the GIL, so threading speeds this up without changing the output. Keep
-        it serial when you already parallelise across images yourself.
+        Number of threads for the per-object Haralick computation. ``None``
+        (the default) parallelises with a capped worker count; ``1`` forces
+        serial; ``-1`` uses all CPUs; ``N`` uses N threads. The per-object
+        calls release the GIL, so threading does not change the output. Pass
+        ``n_jobs=1`` when you already parallelise across images yourself, to
+        avoid oversubscription.
 
     Returns
     -------
@@ -240,8 +258,8 @@ def get_texture(
     features = numpy.empty((n_directions, 13, len(unique_labels)))
 
     # The per-object Haralick calls are independent and release the GIL, so
-    # they parallelise cleanly across threads. Default stays serial; opt in
-    # with n_jobs>1 (or -1 for all cores) — the output is identical either way.
+    # they parallelise cleanly across threads (output is identical to serial).
+    # Parallel by default; pass n_jobs=1 to force serial.
     crops = [prop["intensity_image"] for prop in props]
     workers = _resolve_workers(n_jobs, len(crops))
     if workers == 1:
