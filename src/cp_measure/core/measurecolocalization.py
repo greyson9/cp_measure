@@ -540,6 +540,7 @@ def get_correlation_overlap_ind(
     )
     _, _, _, _, combined_thresh = calculate_threshold(pixels_1, pixels_2, mask, thr)
     # Overlap Coefficient
+    overlap: float | numpy.ndarray = 0.0
     K1: float | numpy.ndarray = 0.0
     K2: float | numpy.ndarray = 0.0
     if combined_thresh.any():  # TODO adjust for multiple labels
@@ -583,11 +584,12 @@ def get_correlation_overlap_ind(
         )
 
         # TODO Revert this block once integer labels are supported
+        overlap = overlap[0]  # type: ignore[index]
         K1 = K1[0]  # type: ignore[index]
         K2 = K2[0]  # type: ignore[index]
     is_scalar = numpy.isscalar(K1)
     return {
-        F_OVERLAP_FORMAT: overlap[0],
+        F_OVERLAP_FORMAT: overlap if is_scalar else overlap[0],  # type: ignore[index, dict-item]
         f"{F_K_FORMAT}_1": K1 if is_scalar else K1[0],  # type: ignore[index, dict-item]
         f"{F_K_FORMAT}_2": K2 if is_scalar else K2[0],  # type: ignore[index, dict-item]
     }

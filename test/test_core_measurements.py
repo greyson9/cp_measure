@@ -195,7 +195,7 @@ def test_texture_n_jobs_matches_serial():
     for r in range(3):
         for c in range(3):
             y, x = 4 + r * 30, 4 + c * 30
-            mask[y:y + 20, x:x + 20] = k
+            mask[y : y + 20, x : x + 20] = k
             k += 1
     pixels = rng.random((96, 96))
 
@@ -204,7 +204,9 @@ def test_texture_n_jobs_matches_serial():
     assert serial.keys() == parallel.keys()
     for key in serial:
         numpy.testing.assert_allclose(
-            serial[key], parallel[key], equal_nan=True,
+            serial[key],
+            parallel[key],
+            equal_nan=True,
             err_msg=f"n_jobs changed output for {key}",
         )
 
@@ -239,3 +241,21 @@ def test_granularity_object_mean_fn_matches_map_coordinates():
     reference = scipy.ndimage.mean(rec_orig, mask, range_)
 
     numpy.testing.assert_allclose(fast, reference, rtol=1e-9, atol=1e-12)
+
+
+def test_correlation_overlap_no_threshold_pixels():
+    """Anti-correlated channels leave no pixels above the colocalization
+    threshold; get_correlation_overlap must return 0.0 rather than raising
+    UnboundLocalError (the overlap value was previously left unassigned in
+    that branch, unlike the K1/K2 coefficients)."""
+    mask = numpy.zeros((10, 10), dtype=numpy.int32)
+    mask[2:8, 2:8] = 1
+    p1 = numpy.zeros((10, 10))
+    p1[2:8, 2:5] = 1.0  # bright left only
+    p2 = numpy.zeros((10, 10))
+    p2[2:8, 5:8] = 1.0  # bright right only (anti-correlated)
+
+    result = get_correlation_overlap(pixels_1=p1, pixels_2=p2, masks=mask)
+    assert result["Correlation_Overlap"] == [0.0]
+    assert result["Correlation_K_1"] == [0.0]
+    assert result["Correlation_K_2"] == [0.0]
