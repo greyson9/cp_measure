@@ -179,3 +179,31 @@ def test_radial_distribution_accepts_bool_mask():
     result = get_radial_distribution(mask, pixels)
     assert len(result) > 0
     assert all(len(v) == 1 for v in result.values())
+
+
+def test_texture_n_jobs_matches_serial():
+    """Parallel texture (n_jobs>1) must produce values identical to serial.
+
+    Threading the per-object Haralick calls is purely a performance change; if
+    it ever altered an output this test fails.
+    """
+    from cp_measure.core.measuretexture import get_texture
+
+    rng = numpy.random.default_rng(3)
+    mask = numpy.zeros((96, 96), dtype=numpy.int32)
+    k = 1
+    for r in range(3):
+        for c in range(3):
+            y, x = 4 + r * 30, 4 + c * 30
+            mask[y:y + 20, x:x + 20] = k
+            k += 1
+    pixels = rng.random((96, 96))
+
+    serial = get_texture(mask, pixels.copy(), n_jobs=1)
+    parallel = get_texture(mask, pixels.copy(), n_jobs=4)
+    assert serial.keys() == parallel.keys()
+    for key in serial:
+        numpy.testing.assert_allclose(
+            serial[key], parallel[key], equal_nan=True,
+            err_msg=f"n_jobs changed output for {key}",
+        )

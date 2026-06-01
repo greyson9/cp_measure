@@ -142,6 +142,9 @@ References
 .. |MT_image1| image:: {MEASURE_TEXTURE_3D_INFO2}
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import mahotas.features
 import numpy
 import skimage.exposure
@@ -154,11 +157,30 @@ InverseDifferenceMoment SumAverage SumVariance SumEntropy Entropy
 DifferenceVariance DifferenceEntropy InfoMeas1 InfoMeas2""".split()
 
 
+def _resolve_workers(n_jobs: int | None, n_items: int) -> int:
+    """Map an sklearn-style ``n_jobs`` to a concrete, bounded worker count."""
+    if n_jobs is None or n_jobs == 1:
+        return 1
+    workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    return max(1, min(workers, n_items or 1))
+
+
+def _haralick_features(label_data, scale: int, n_directions: int) -> numpy.ndarray:
+    """Haralick features for one object's crop, or an all-NaN ``(n_directions,
+    13)`` block when the crop is too small for the scale (the object's texture
+    is then undefined, matching the original behaviour)."""
+    try:
+        return mahotas.features.haralick(label_data, distance=scale, ignore_zeros=True)
+    except ValueError:
+        return numpy.full((n_directions, 13), numpy.nan)
+
+
 def get_texture(
     masks: NDArray[numpy.integer],
     pixels: NDArray[numpy.floating],
     scale: int = 3,
     gray_levels: int = 256,
+    n_jobs: int | None = None,
 ) -> dict[str, NDArray[numpy.floating]]:
     """
     Parameters
@@ -177,6 +199,11 @@ def get_texture(
         is smaller than most of your objects. For very small objects (smaller
         than the scale of texture you are measuring), the texture cannot be
         measured and will result in a undefined value in the output file.
+    n_jobs : int, optional (default is None)
+        Number of threads for the per-object Haralick computation. ``None`` or
+        ``1`` runs serially; ``-1`` uses all CPUs. The per-object calls release
+        the GIL, so threading speeds this up without changing the output. Keep
+        it serial when you already parallelise across images yourself.
 
     Returns
     -------
@@ -212,14 +239,20 @@ def get_texture(
 
     features = numpy.empty((n_directions, 13, len(unique_labels)))
 
-    for index, prop in enumerate(props):
-        label_data = prop["intensity_image"]
-        try:
-            features[:, :, index] = mahotas.features.haralick(
-                label_data, distance=scale, ignore_zeros=True
-            )
-        except ValueError:
-            features[:, :, index] = numpy.nan
+    # The per-object Haralick calls are independent and release the GIL, so
+    # they parallelise cleanly across threads. Default stays serial; opt in
+    # with n_jobs>1 (or -1 for all cores) — the output is identical either way.
+    crops = [prop["intensity_image"] for prop in props]
+    workers = _resolve_workers(n_jobs, len(crops))
+    if workers == 1:
+        for index, crop in enumerate(crops):
+            features[:, :, index] = _haralick_features(crop, scale, n_directions)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for index, feats in enumerate(
+                pool.map(lambda c: _haralick_features(c, scale, n_directions), crops)
+            ):
+                features[:, :, index] = feats
 
     # MODIFIED: Reconstructed name:
     # Texture_{X}_{scale}_{direction_id}_{graylevels}
