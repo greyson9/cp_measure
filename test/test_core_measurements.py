@@ -259,3 +259,33 @@ def test_correlation_overlap_no_threshold_pixels():
     assert result["Correlation_Overlap"] == [0.0]
     assert result["Correlation_K_1"] == [0.0]
     assert result["Correlation_K_2"] == [0.0]
+
+
+def test_radial_distribution_center_labels():
+    """center_labels re-centers the radial bins on another object's centroid
+    (CellProfiler "Centers of other objects"). An off-center center object must
+    change the distribution relative to self-centering, and the output stays
+    well-formed.
+    """
+    from cp_measure.core.measureobjectintensitydistribution import (
+        get_radial_distribution,
+    )
+
+    cell = numpy.zeros((60, 60), dtype=numpy.int32)
+    cell[5:55, 5:55] = 1
+    nucleus = numpy.zeros((60, 60), dtype=numpy.int32)
+    nucleus[10:20, 10:20] = 1  # off-center within the cell
+    pixels = numpy.random.default_rng(0).random((60, 60))
+
+    self_centered = get_radial_distribution(cell, pixels, bin_count=4)
+    nucleus_centered = get_radial_distribution(
+        cell, pixels, bin_count=4, center_labels=nucleus
+    )
+
+    assert self_centered.keys() == nucleus_centered.keys()
+    assert all(len(v) == 1 for v in nucleus_centered.values())
+    # an off-center nucleus shifts the radial fractions
+    assert not numpy.allclose(
+        self_centered["RadialDistribution_FracAtD_1of4"],
+        nucleus_centered["RadialDistribution_FracAtD_1of4"],
+    )

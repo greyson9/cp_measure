@@ -89,12 +89,52 @@ MEASUREMENT_ALIASES = {
 }
 
 
+def _other_object_centers(labels, unique_labels, center_labels):
+    """Per-object centers taken from another object set (CellProfiler's
+    "Centers of other objects").
+
+    For each object in ``labels`` (e.g. a cell), use the centroid of the
+    center-object in ``center_labels`` (e.g. the nucleus) whose centroid lies
+    within it. Returns ``(i, j, seed)``: per-object center coordinates in
+    ``unique_labels`` order (for the anisotropy calculation) and a seed label
+    image with each center positioned at its containing object's label (the
+    seed for the propagate step). Objects with no center-object inside get no
+    seed and therefore no measurement, matching CellProfiler.
+    """
+    present = numpy.unique(center_labels)
+    present = present[present > 0]
+    centers = centrosome.cpmorphology.centers_of_labels(center_labels)
+    ci = numpy.clip(
+        numpy.round(centers[0, present - 1]).astype(int), 0, labels.shape[0] - 1
+    )
+    cj = numpy.clip(
+        numpy.round(centers[1, present - 1]).astype(int), 0, labels.shape[1] - 1
+    )
+
+    containing = labels[ci, cj]  # measured-object label at each center centroid
+    inside = containing > 0
+
+    seed = numpy.zeros(labels.shape, int)
+    seed[ci[inside], cj[inside]] = containing[inside]
+
+    i = numpy.zeros(len(unique_labels), int)
+    j = numpy.zeros(len(unique_labels), int)
+    index_of = {int(lab): k for k, lab in enumerate(unique_labels.tolist())}
+    for n in numpy.flatnonzero(inside):
+        k = index_of.get(int(containing[n]))
+        if k is not None:
+            i[k] = ci[n]
+            j[k] = cj[n]
+    return i, j, seed
+
+
 def get_radial_distribution(
     labels: NDArray[numpy.integer],
     pixels: NDArray[numpy.floating],
     scaled: bool = True,
     bin_count: int = 4,
     maximum_radius: int = 100,
+    center_labels: NDArray[numpy.integer] | None = None,
 ) -> dict[str, NDArray[numpy.floating]]:
     """
     Radial features (2D only)
@@ -132,6 +172,13 @@ def get_radial_distribution(
         creates the number of bins that you specify and creates equally spaced bin
         boundaries up to the maximum radius. Parts of the object that are beyond this
         radius will be counted in an overflow bin. The radius is measured in pixels.
+
+    center_labels : NDArray[int], optional
+        Label image of a second object set (e.g. nuclei) used as the center of
+        the radial bins, matching CellProfiler's "Centers of other objects".
+        Each object in ``labels`` is centered on the centroid of the
+        center-object that lies within it. If ``None`` (default) each object is
+        centered on its own farthest-from-edge point.
     """
 
     if labels.ndim == 3:
@@ -145,25 +192,29 @@ def get_radial_distribution(
     nobjects = len(unique_labels)
     d_to_edge = centrosome.cpmorphology.distance_to_edge(labels)
 
-    # Find the point in each object farthest away from the edge.
-    # This does better than the centroid:
-    # * The center is within the object
-    # * The center tends to be an interesting point, like the
-    #   center of the nucleus or the center of one or the other
-    #   of two touching cells.
-    #
-    # MODIFICATION: Delegated label indices to maximum_position_of_labels
-    # This should not affect this one-mask/object function
-    i, j = centrosome.cpmorphology.maximum_position_of_labels(
-        # d_to_edge, labels, indices=[1]
-        d_to_edge,
-        labels,
-        indices=unique_labels,
-    )
+    if center_labels is None:
+        # Find the point in each object farthest away from the edge.
+        # This does better than the centroid:
+        # * The center is within the object
+        # * The center tends to be an interesting point, like the
+        #   center of the nucleus or the center of one or the other
+        #   of two touching cells.
+        #
+        # MODIFICATION: Delegated label indices to maximum_position_of_labels
+        # This should not affect this one-mask/object function
+        i, j = centrosome.cpmorphology.maximum_position_of_labels(
+            # d_to_edge, labels, indices=[1]
+            d_to_edge,
+            labels,
+            indices=unique_labels,
+        )
 
-    center_labels = numpy.zeros(labels.shape, int)
-
-    center_labels[i, j] = labels[i, j]
+        center_seed = numpy.zeros(labels.shape, int)
+        center_seed[i, j] = labels[i, j]
+    else:
+        # Center each object on the centroid of the center-object (e.g. nucleus)
+        # that lies within it — CellProfiler's "Centers of other objects".
+        i, j, center_seed = _other_object_centers(labels, unique_labels, center_labels)
 
     #
     # Use the coloring trick here to process touching objects
@@ -180,7 +231,7 @@ def get_radial_distribution(
     for color in range(1, ncolors + 1):
         mask = colors == color
         l_, d = centrosome.propagate.propagate(
-            numpy.zeros(center_labels.shape), center_labels, mask, 1
+            numpy.zeros(center_seed.shape), center_seed, mask, 1
         )
 
         d_from_center[mask] = d[mask]
