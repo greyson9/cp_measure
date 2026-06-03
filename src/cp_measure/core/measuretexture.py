@@ -260,7 +260,7 @@ def get_texture(
     # The per-object Haralick calls are independent and release the GIL, so
     # they parallelise cleanly across threads (output is identical to serial).
     # Parallel by default; pass n_jobs=1 to force serial.
-    crops = [prop["intensity_image"] for prop in props]
+    crops = [prop["image_intensity"] for prop in props]
     workers = _resolve_workers(n_jobs, len(crops))
     if workers == 1:
         for index, crop in enumerate(crops):
