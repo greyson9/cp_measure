@@ -195,6 +195,7 @@ def get_texture(
     masks: NDArray[numpy.integer],
     pixels: NDArray[numpy.floating],
     scale: int = 3,
+    in_range: tuple[float, float] = (0.0, 1.0),
     gray_levels: int = 256,
     n_jobs: int | None = None,
 ) -> dict[str, NDArray[numpy.floating]]:
@@ -205,7 +206,7 @@ def get_texture(
         Number of gray levels. Measuring at more levels gives you _potentially_
         more detailed information about your image, but at the cost of somewhat
         decreased processing speed (default is 256).
-    texture_scale : int, optional (default is 3)
+    scale : int, optional (default is 3)
         You can specify the scale of texture to be measured, in pixel units; the
         texture scale is the distance between correlated intensities in the
         image. A higher number for the scale of texture measures larger patterns
@@ -215,6 +216,11 @@ def get_texture(
         is smaller than most of your objects. For very small objects (smaller
         than the scale of texture you are measuring), the texture cannot be
         measured and will result in a undefined value in the output file.
+    in_range : tuple of float, optional (default is (0.0, 1.0))
+        The input range of the image. If rescaling based on the image, the input
+        range is taken from the image; otherwise, the input range is provided
+        by the user. The input range is used to rescale the 
+        image before calculating the Haralick features.
     n_jobs : int, optional (default is None)
         Number of threads for the per-object Haralick computation. ``None``
         (the default) parallelises with a capped worker count; ``1`` forces
@@ -247,12 +253,15 @@ def get_texture(
 
     # mahotas.features.haralick bricks itself when provided a
     # dtype larger than uint8 (version 1.4.3)
-    pixels = skimage.util.img_as_ubyte(pixels, force_copy=True)
-    pixels[~masks.astype(bool)] = 0
-    if gray_levels != 256:
-        pixels = skimage.exposure.rescale_intensity(
-            pixels, in_range=(0, 255), out_range=(0, gray_levels - 1)
-        ).astype(numpy.uint8)
+    m = masks.astype(bool)
+    if in_range_source != "dataset":
+        lo, hi = pixels.min(), pixels.max()
+    else:
+        lo, hi = in_range
+    pixels = skimage.exposure.rescale_intensity(
+        pixels, in_range=(lo, hi), out_range=(0, gray_levels - 1)
+    ).astype(numpy.uint8)
+    pixels[~m] = 0
     props = skimage.measure.regionprops(masks, pixels)
 
     features = numpy.empty((n_directions, 13, len(unique_labels)))

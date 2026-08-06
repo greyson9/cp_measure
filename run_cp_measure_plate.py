@@ -46,12 +46,12 @@ from scipy.ndimage import gaussian_laplace, grey_dilation, grey_erosion
 from skimage.feature import blob_log
 from skimage.segmentation import expand_labels, relabel_sequential
 
+from cp_measure.core.measuregranularity import get_granularity
 from cp_measure.core.measureobjectintensity import get_intensity
 from cp_measure.core.measureobjectintensitydistribution import get_radial_distribution
-from cp_measure.core.measureobjectsizeshape import get_feret, get_sizeshape, get_zernike
-from cp_measure.core.measuregranularity import get_granularity
-from cp_measure.core.measuretexture import get_texture
 from cp_measure.multimask.measureobjectneighbors import measureobjectneighbors
+from cp_measure.core.measureobjectsizeshape import get_feret, get_sizeshape, get_zernike
+from cp_measure.core.measuretexture import get_texture
 
 # Quiet two known-benign, high-volume warnings so genuine per-field errors (counted
 # and printed separately) stay visible: (1) cp_measure's radial distribution does
@@ -109,7 +109,7 @@ SPOT_TYPES = {"SpotsCy3Cyto": ("Cy3", "cyto"), "SpotsCy3Nuc": ("Cy3", "nuc"),
 ALL_FEATURES = ["shape", "intensity", "texture", "granularity", "radial", "neighbors", "relate", "spots"]
 
 DEFAULT_IMAGES = "/home/grlewis/Projects/1017/output/20260421_compound_plate46/image_correction/rescaled_imgs"
-DEFAULT_MASKS = "/home/grlewis/Projects/1017/output/20260421_compound_plate46"
+DEFAULT_MASKS = "/home/grlewis/Projects/1017/output/20260421_compound_plate46/segmentation/cellpose"
 # -----------------------------------------------------------------------------
 
 
@@ -312,7 +312,8 @@ def add_spot_measurements(results, spots, cyto_inv):
         _append(results[obj_set], items)
 
 
-def featurize_object_set(obj_set, mask, channels, features, radial_center=None):
+
+def featurize_object_set(obj_set, mask, channels, features, in_range, radial_center=None):
     """Return (columns, data[obj, feat], object_ids, center_x, center_y)."""
     ss = get_sizeshape(mask, None)
     cx, cy = np.asarray(ss["Center_X"], float), np.asarray(ss["Center_Y"], float)
@@ -339,7 +340,8 @@ def featurize_object_set(obj_set, mask, channels, features, radial_center=None):
                 data.append(np.asarray(v, float))
         if "texture" in features:
             for sc in TEXTURE_SCALES:
-                for k, v in get_texture(mask, img, scale=sc, gray_levels=TEXTURE_GRAY, n_jobs=1).items():
+                for k, v in get_texture(mask, img, scale=sc, in_range=in_range, 
+                                        gray_levels=TEXTURE_GRAY, n_jobs=1).items():
                     feat, rest = k.split("_", 1)
                     cols.append(f"Texture_{feat}_{ch}_{rest}")
                     data.append(np.asarray(v, float))
@@ -386,7 +388,7 @@ def write_table(path, well, site, obj_set, cols, data, ids, cx, cy, fmt):
 
 
 def process_field(task):
-    field, outdir, features, fmt, objects = task
+    field, outdir, features, fmt, objects, in_range = task
     t = time.perf_counter()
     try:
         channels = {ch: _normalize(tifffile.imread(p)) for ch, p in field["channels"].items()}
@@ -414,7 +416,8 @@ def process_field(task):
                 continue
             center_set = RADIAL_CENTER.get(obj_set)
             radial_center = masks.get(center_set) if center_set else None
-            cols, data, ids, cx, cy = featurize_object_set(obj_set, masks[obj_set], channels, features, radial_center)
+            cols, data, ids, cx, cy = featurize_object_set(obj_set, masks[obj_set], channels, 
+                                                           features, in_range, radial_center)
             results[obj_set] = {"cols": list(cols), "data": data, "ids": ids, "cx": cx, "cy": cy}
         if "relate" in features:
             add_relate_columns(results, masks, cyto_to_cell)
@@ -522,6 +525,8 @@ def main():
     ap.add_argument("--objects", default="Cells,Nuclei", help="comma list of object sets")
     ap.add_argument("--features", default=",".join(ALL_FEATURES),
                     help=f"comma list from {ALL_FEATURES}")
+    ap.add_argument("--in_range", default="0.0,1.0",
+                    help="input intensity range as a comma-separated list of two floats")
     ap.add_argument("--format", choices=["auto", "parquet", "csv"], default="auto")
     ap.add_argument("--limit", type=int, default=None, help="process only the first N fields")
     ap.add_argument("--plate-name", default=None,
@@ -535,6 +540,11 @@ def main():
 
     objects = [o for o in args.objects.split(",") if o]
     features = [f for f in args.features.split(",") if f]
+    in_range = [float(x) for x in args.in_range.split(",")]
+    if len(in_range) != 2 or in_range[0] >= in_range[1]:
+        print(f"Invalid --in_range {args.in_range} — must be two floats, min < max. Using default 0.0,1.0.", flush=True)
+        in_range = (0.0, 1.0)
+
     fmt = resolve_format(args.format)
     os.makedirs(args.output_dir, exist_ok=True)
     plate_name = args.plate_name or os.path.basename(os.path.normpath(args.output_dir))
@@ -553,7 +563,7 @@ def main():
 
     t0 = time.perf_counter()
     ok = err = nobj = 0
-    tasks = [(f, args.output_dir, features, fmt, objects) for f in fields]
+    tasks = [(f, args.output_dir, features, fmt, objects, in_range) for f in fields]
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futures = [ex.submit(process_field, t) for t in tasks]
         for i, fut in enumerate(as_completed(futures), 1):
