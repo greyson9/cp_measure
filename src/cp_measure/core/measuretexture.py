@@ -217,10 +217,29 @@ def get_texture(
         than the scale of texture you are measuring), the texture cannot be
         measured and will result in a undefined value in the output file.
     in_range : tuple of float, optional (default is (0.0, 1.0))
-        The input range of the image. If rescaling based on the image, the input
-        range is taken from the image; otherwise, the input range is provided
-        by the user. The input range is used to rescale the 
-        image before calculating the Haralick features.
+        ``(lo, hi)`` intensity window used to rescale the image to
+        0 - [gray_levels - 1] before the Haralick features are computed. The
+        default ``(0.0, 1.0)`` means "the caller has already normalized this
+        image to [0, 1]"; raw uint16 or unnormalized float input must pass a
+        window that covers its own data.
+
+        In-mask pixels outside the window are NOT silently clipped - a
+        ``ValueError`` is raised instead, because saturating them flattens the
+        GLCM and quietly degrades every Haralick feature. Two self-consistent
+        ways to choose the window follow from that:
+
+        - A percentile window (e.g. 0 to the pooled 99.9th percentile) requires
+          the caller to clip the image to that same window first. The clipping
+          is then a deliberate, documented decision, and this guard still
+          catches accidental mismatches.
+        - A covering window (0 to the pooled maximum) needs no clipping, but a
+          single bright outlier stretches ``hi`` and collapses dim images into a
+          small fraction of the available gray levels.
+
+        For texture to be comparable ACROSS images, pass one fixed
+        dataset-wide window rather than each image's own min/max. Choose it per
+        channel when channels have different dynamic ranges - a single window
+        shared across channels under-uses gray levels for the dim ones.
     n_jobs : int, optional (default is None)
         Number of threads for the per-object Haralick computation. ``None``
         (the default) parallelises with a capped worker count; ``1`` forces
