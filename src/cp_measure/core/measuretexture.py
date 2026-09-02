@@ -195,7 +195,7 @@ def get_texture(
     masks: NDArray[numpy.integer],
     pixels: NDArray[numpy.floating],
     scale: int = 3,
-    in_range: tuple[float, float] = (0.0, 1.0),
+    in_range: tuple[float, float] = (0, 1),
     gray_levels: int = 256,
     n_jobs: int | None = None,
 ) -> dict[str, NDArray[numpy.floating]]:
@@ -254,12 +254,23 @@ def get_texture(
     # mahotas.features.haralick bricks itself when provided a
     # dtype larger than uint8 (version 1.4.3)
     m = masks.astype(bool)
-    if in_range_source != "dataset":
-        lo, hi = pixels.min(), pixels.max()
-    else:
+    # Fail loud rather than silently clip: if in-mask pixels fall outside
+    # in_range, rescale_intensity would saturate them, degrading the GLCM
+    # (e.g. a uint16/float image measured against the default (0, 1) collapses
+    # to a uniform, textureless image). The caller must pass an in_range that
+    # actually covers the data (ideally a fixed dataset-wide range so texture
+    # is comparable across images).
+    if m.any():
         lo, hi = in_range
+        obj_min, obj_max = float(pixels[m].min()), float(pixels[m].max())
+        if obj_min < lo or obj_max > hi:
+            raise ValueError(
+                f"in-mask pixel range [{obj_min:g}, {obj_max:g}] falls outside "
+                f"in_range={in_range}; rescaling would silently clip and degrade "
+                f"the texture features. Pass an in_range that covers the data."
+            )
     pixels = skimage.exposure.rescale_intensity(
-        pixels, in_range=(lo, hi), out_range=(0, gray_levels - 1)
+        pixels, in_range=in_range, out_range=(0, gray_levels - 1)
     ).astype(numpy.uint8)
     pixels[~m] = 0
     props = skimage.measure.regionprops(masks, pixels)
